@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Standby after a cast that switched the TV on (CastAutoSleep). Kept apart from strings.xml. -->
+<resources>
+    <string name="auto_sleep_title">Casting Ended</string>
+    <string name="auto_sleep_body">This TV will return to standby in %1$d seconds. Press any button to keep it on.</string>
+    <string name="auto_sleep_keep_on">Keep On</string>
+    <string name="auto_sleep_setting">Standby After Casting</string>
+    <string name="auto_sleep_setting_desc">Applies only when casting turned the TV on and nobody used the remote during the cast. A 30-second countdown starts when casting ends; press any button to cancel. Needs Button Control or Remote Control Access to be available.</string>
+</resources>

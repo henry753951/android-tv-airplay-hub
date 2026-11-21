@@ -48,6 +48,11 @@ class VideoRenderer(ctx: Context) {
     // anchors that map decoder PTS (us) to System.nanoTime() for scheduled rendering
     private var _ptsBaseUs = Long.MIN_VALUE
     private var _wallBaseNs = 0L
+    // Output is released by its own thread the moment the decoder has it. Draining only when the next
+    // input arrived held every frame back by one, and a still screen (no new input) kept its last
+    // change stuck inside the decoder.
+    private var _drainThread: Thread? = null
+    @Volatile private var _draining = false
 
     fun setResolution(w: Int, h: Int) = synchronized(lock) {
         if (w == videoWidth && h == videoHeight) return@synchronized
@@ -139,7 +144,6 @@ class VideoRenderer(ctx: Context) {
             try {
                 if (codec == null) startCodec(isH265)
                 _feedToCodec(data, ntpTimeNs)
-                drainOutput()
             } catch (e: Exception) {
                 Log.w(TAG, "Codec error, resetting", e)
                 stopCodec()
@@ -161,7 +165,6 @@ class VideoRenderer(ctx: Context) {
                 firstFrameQueued = true
                 return
             }
-            drainOutput()
         }
         droppedFrames++
         Log.w(TAG, "Decoder input queue full; dropping frame. drops=$droppedFrames")
@@ -205,6 +208,7 @@ class VideoRenderer(ctx: Context) {
             Log.w(TAG, "Hardware decoder failed, trying software fallback", e)
             _startWithLadder(sw, mime, s, h265)
         }
+        codec?.let { _startDrain(it) }
         Log.i(TAG, "Video codec started: $mime ${videoWidth}x${videoHeight} ($codecName)")
     }
 
@@ -254,6 +258,8 @@ class VideoRenderer(ctx: Context) {
     }
 
     private fun stopCodec() {
+        // the drain thread must be out of the codec before it is stopped
+        _stopDrain()
         pipeline.useFullRangeYuv = false
         _frameIntervalIdx = 0
         _frameIntervalCount = 0
@@ -269,26 +275,52 @@ class VideoRenderer(ctx: Context) {
         codec = null
     }
 
-    private fun drainOutput() {
-        val c = codec ?: return
+    private fun _startDrain(c: MediaCodec) {
+        _draining = true
+        _drainThread = Thread({ _drainLoop(c) }, "VideoDrain").also { it.start() }
+    }
+
+    private fun _stopDrain() {
+        _draining = false
+        val t = _drainThread ?: return
+        _drainThread = null
+        if (t !== Thread.currentThread()) {
+            try { t.join(DRAIN_JOIN_MS) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+        }
+    }
+
+    private fun _drainLoop(c: MediaCodec) {
+        android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DISPLAY)
         val info = MediaCodec.BufferInfo()
-        while (true) {
-            val idx = c.dequeueOutputBuffer(info, 0)
-            if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                val f = c.outputFormat
-                fun value(key: String) = if (f.containsKey(key)) f.getInteger(key) else 0
-                pipeline.useFullRangeYuv = ColorPolicy.rawYuv(
-                    value(MediaFormat.KEY_COLOR_STANDARD), value(MediaFormat.KEY_COLOR_RANGE),
-                    value(MediaFormat.KEY_COLOR_TRANSFER), value(MediaFormat.KEY_COLOR_FORMAT)
-                )
-                colorInfo = listOf(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.KEY_COLOR_RANGE,
-                    MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.KEY_COLOR_FORMAT).joinToString { "$it=${if (f.containsKey(it)) f.getInteger(it) else 0}" }
-                Log.i(TAG, "Decoder output: $colorInfo")
-                benchmarkLogCallback?.invoke("Decoder output: $colorInfo")
-                continue
+        while (_draining) {
+            val idx = try {
+                c.dequeueOutputBuffer(info, DRAIN_WAIT_US)
+            } catch (e: IllegalStateException) {
+                // codec errored or is being torn down; the feed path resets it on its next frame
+                break
             }
-            if (idx < 0) break
-            _recordOutputFrameTime()
+            when {
+                idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> _onOutputFormat(c.outputFormat)
+                idx >= 0 -> _release(c, idx, info)
+            }
+        }
+    }
+
+    private fun _onOutputFormat(f: MediaFormat) {
+        fun value(key: String) = if (f.containsKey(key)) f.getInteger(key) else 0
+        pipeline.useFullRangeYuv = ColorPolicy.rawYuv(
+            value(MediaFormat.KEY_COLOR_STANDARD), value(MediaFormat.KEY_COLOR_RANGE),
+            value(MediaFormat.KEY_COLOR_TRANSFER), value(MediaFormat.KEY_COLOR_FORMAT)
+        )
+        colorInfo = listOf(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.KEY_COLOR_RANGE,
+            MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.KEY_COLOR_FORMAT).joinToString { "$it=${if (f.containsKey(it)) f.getInteger(it) else 0}" }
+        Log.i(TAG, "Decoder output: $colorInfo")
+        benchmarkLogCallback?.invoke("Decoder output: $colorInfo")
+    }
+
+    private fun _release(c: MediaCodec, idx: Int, info: MediaCodec.BufferInfo) {
+        _recordOutputFrameTime()
+        try {
             if (scheduledOutputBufferRelease) {
                 // schedule frame at VSYNC matching its NTP presentation time
                 val ptsUs = info.presentationTimeUs
@@ -300,6 +332,8 @@ class VideoRenderer(ctx: Context) {
             } else {
                 c.releaseOutputBuffer(idx, true)
             }
+        } catch (_: IllegalStateException) {
+            _draining = false
         }
     }
 
@@ -341,5 +375,7 @@ class VideoRenderer(ctx: Context) {
         private const val FEED_WAIT_US = 20_000L
         private const val FEED_RETRIES = 10
         private const val FIRST_FEED_RETRIES = 50
+        private const val DRAIN_WAIT_US = 10_000L
+        private const val DRAIN_JOIN_MS = 500L
     }
 }

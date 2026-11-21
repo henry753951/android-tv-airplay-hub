@@ -1122,8 +1122,13 @@ impl CompanionSession {
                 }
             }
             self.touch_last = Some(position);
-            if mode == TrackpadMode::Direction && !self.touch_moved {
-                self.touch_moved = self.send_swipe(position.0 - origin.0, position.1 - origin.1);
+            // Every further stretch of travel moves once more, so one long swipe scrolls a list the
+            // way the Siri Remote does instead of stopping after the first step.
+            if mode == TrackpadMode::Direction
+                && self.send_swipe(position.0 - origin.0, position.1 - origin.1)
+            {
+                self.touch_moved = true;
+                self.touch_origin = Some(position);
             }
             return;
         }
@@ -1251,7 +1256,7 @@ mod auth_tests {
     }
 
     #[tokio::test]
-    async fn swipes_fire_before_lift_once_and_do_not_become_taps() {
+    async fn swipes_fire_while_moving_repeat_per_stretch_and_do_not_become_taps() {
         for (dx, dy, name) in [
             (200.0, 0.0, "right"),
             (-200.0, 0.0, "left"),
@@ -1271,12 +1276,16 @@ mod auth_tests {
             assert!(buttons.0.lock().unwrap().is_empty());
             session.handle_touch(&touch(2, 500.0 + dx, 500.0 + dy));
             assert_eq!(*buttons.0.lock().unwrap(), vec![name]);
-            session.handle_touch(&touch(2, 500.0 + dx * 2.0, 500.0 + dy * 2.0));
-            session.handle_touch(&touch(4, 500.0, 500.0));
+            // a short wobble after a step is not another step
+            session.handle_touch(&touch(2, 500.0 + dx * 1.2, 500.0 + dy * 1.2));
             assert_eq!(*buttons.0.lock().unwrap(), vec![name]);
+            session.handle_touch(&touch(2, 500.0 + dx * 2.0, 500.0 + dy * 2.0));
+            assert_eq!(*buttons.0.lock().unwrap(), vec![name, name]);
+            session.handle_touch(&touch(4, 500.0, 500.0));
+            assert_eq!(*buttons.0.lock().unwrap(), vec![name, name]);
             session.handle_touch(&touch(1, 500.0, 500.0));
             session.handle_touch(&touch(4, 501.0, 501.0));
-            assert_eq!(*buttons.0.lock().unwrap(), vec![name, "select"]);
+            assert_eq!(*buttons.0.lock().unwrap(), vec![name, name, "select"]);
         }
     }
 

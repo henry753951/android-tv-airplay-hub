@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Standby after a cast that switched the TV on (CastAutoSleep). Kept apart from strings.xml. -->
+<resources>
+    <string name="auto_sleep_title">投放已結束</string>
+    <string name="auto_sleep_body">電視將在 %1$d 秒後回到待機。按任意鍵可保持開啟。</string>
+    <string name="auto_sleep_keep_on">保持開啟</string>
+    <string name="auto_sleep_setting">投放結束後回到待機</string>
+    <string name="auto_sleep_setting_desc">只在電視是由投放開啟、且投放期間沒有人按過遙控器時生效。投放結束後會倒數 30 秒，按任意鍵即可取消。需要「按鍵控制」或「遙控器操作權限」其中一項可用。</string>
+</resources>

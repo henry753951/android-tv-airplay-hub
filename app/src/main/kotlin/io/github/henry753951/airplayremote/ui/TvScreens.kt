@@ -1225,6 +1225,7 @@ private fun powerItems(viewModel: MainViewModel): List<TvItem> {
         selected = if (standby) Prefs.ON else Prefs.OFF,
         onPick = { viewModel.set(Prefs.STANDBY_REACHABLE, it == Prefs.ON) }
     ),
+    toggle(viewModel, Prefs.AUTO_SLEEP_AFTER_CAST, R.string.auto_sleep_setting, R.string.auto_sleep_setting_desc),
     toggle(viewModel, Prefs.KEEP_SCREEN_ON, R.string.setting_keep_screen_on, R.string.setting_keep_screen_on_desc),
     toggle(viewModel, Prefs.AUTO_START, R.string.setting_auto_start, R.string.setting_auto_start_desc),
 )

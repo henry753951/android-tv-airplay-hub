@@ -112,6 +112,8 @@ object Prefs {
     val IDLE_PREVIEW = bool("idle_preview", false)
     val AUTO_FULLSCREEN = bool("auto_fullscreen", true)
     val KEEP_SCREEN_ON = bool("keep_screen_on", true)
+    // standby again after a cast that switched the TV on ends untouched (CastAutoSleep)
+    val AUTO_SLEEP_AFTER_CAST = bool("auto_sleep_after_cast", true)
     val ADVERTISE_VIDEO = bool("advertise_video", true, restart = true)
     val ADVERTISE_MIRRORING = bool("advertise_mirroring", true, restart = true)
     val ADVERTISE_AUDIO = bool("advertise_audio", true, restart = true)

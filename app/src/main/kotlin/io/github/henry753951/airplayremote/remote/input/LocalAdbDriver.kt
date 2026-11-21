@@ -132,6 +132,25 @@ object LocalAdbDriver {
         "siri" to KeyEvent.KEYCODE_SEARCH
     )
 
+    // The helper dies with ADB after standby; the first press after waking used to be dropped while it
+    // reconnected. Wait briefly for it instead: a late key beats a lost one.
+    private const val RECONNECT_WAIT_MS = 2_500L
+
+    private fun awaitConnection(timeoutMs: Long): Boolean {
+        initAsync()
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (enabled && !isConnected.get() && SystemClock.elapsedRealtime() < deadline) {
+            if (!connecting.get()) initAsync()
+            try {
+                Thread.sleep(25)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+        }
+        return isConnected.get()
+    }
+
     fun sendKey(buttonName: String, isMappedToMenu: Boolean = false): Boolean {
         if (!enabled) return false
         val keycode = if (isMappedToMenu) {
@@ -140,10 +159,7 @@ object LocalAdbDriver {
             KEY_MAP[buttonName.lowercase()] ?: return false
         }
 
-        if (!isConnected.get()) {
-            initAsync()
-            return false
-        }
+        if (!isConnected.get() && !awaitConnection(RECONNECT_WAIT_MS)) return false
 
         return synchronized(this) {
             try {

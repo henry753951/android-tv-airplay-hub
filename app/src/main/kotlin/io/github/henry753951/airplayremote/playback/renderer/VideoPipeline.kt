@@ -13,6 +13,7 @@ import android.view.Surface
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.util.concurrent.atomic.AtomicInteger
 
 // decodes into an app-owned SurfaceTexture that outlives display surface
 // gl thread blits it to any surface attached, so fullscreen toggles re-point display without restarting codec
@@ -42,7 +43,12 @@ class VideoPipeline {
     private var frameCallbacks: HandlerThread? = null
     var inputSurface: Surface? = null; private set
 
-    @Volatile private var frameAvailable = false
+    // One count per frame the decoder queued. A boolean merged two quick frames into one wake, so one
+    // buffer stayed behind for good: each network burst added a frame of delay until the queue filled,
+    // the decoder stalled and input frames were dropped.
+    private val pendingFrames = AtomicInteger(0)
+    // glGetError waits on the GL pipeline; check the raw YUV path once, not every frame
+    private var yuvVerified = false
     private var pendingDisplay: Surface? = null
     private var displayDirty = false
     @Volatile private var videoW = 0
@@ -89,22 +95,19 @@ class VideoPipeline {
             while (true) {
                 var newDisplay: Surface? = null
                 var displayChanged = false
-                var doFrame = false
+                var frames = 0
                 synchronized(lock) {
-                    while (running && !frameAvailable && !displayDirty) lock.wait()
+                    while (running && pendingFrames.get() == 0 && !displayDirty) lock.wait()
                     if (running && displayDirty) {
                         newDisplay = pendingDisplay
                         displayChanged = true
                         displayDirty = false
                     }
-                    if (running && frameAvailable) {
-                        frameAvailable = false
-                        doFrame = true
-                    }
+                    if (running) frames = pendingFrames.getAndSet(0)
                 }
                 if (!running) break
                 if (displayChanged) _bindDisplay(newDisplay)
-                if (doFrame) _consumeAndDraw()
+                if (frames > 0) _consumeAndDraw(frames)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Video output failed", e)
@@ -134,20 +137,18 @@ class VideoPipeline {
         if (hasFrame) _render()
     }
 
-    private fun _consumeAndDraw() {
+    private fun _consumeAndDraw(frames: Int) {
         val st = surfaceTexture ?: return
         val egl = egl ?: return
+        if (window == EGL14.EGL_NO_SURFACE) egl.makeCurrent() else egl.makeCurrent(window)
+        // latch every queued frame and show only the newest: being current beats showing each one late
+        repeat(frames) { st.updateTexImage() }
+        st.getTransformMatrix(texMatrix)
         if (window == EGL14.EGL_NO_SURFACE) {
             // no display: keep consuming so decoder doesn't stall
-            egl.makeCurrent()
-            st.updateTexImage()
-            st.getTransformMatrix(texMatrix)
             hasFrame = true
             return
         }
-        egl.makeCurrent(window)
-        st.updateTexImage()
-        st.getTransformMatrix(texMatrix)
         hasFrame = true
         _render()
     }
@@ -174,7 +175,7 @@ class VideoPipeline {
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         GLES20.glDisableVertexAttribArray(aPos)
         GLES20.glDisableVertexAttribArray(aTex)
-        if (selected == yuvProgram && GLES20.glGetError() != GLES20.GL_NO_ERROR) {
+        if (selected == yuvProgram && !yuvVerified && GLES20.glGetError() != GLES20.GL_NO_ERROR) {
             // Some drivers advertise the extension but reject the decoder's buffer layout.
             GLES20.glDeleteProgram(yuvProgram)
             yuvProgram = 0
@@ -182,6 +183,7 @@ class VideoPipeline {
             _render()
             return
         }
+        if (selected == yuvProgram) yuvVerified = true
         egl?.swap(window)
     }
 
@@ -209,7 +211,8 @@ class VideoPipeline {
         surfaceTexture = SurfaceTexture(oesTex).also {
             if (videoW > 0 && videoH > 0) it.setDefaultBufferSize(videoW, videoH)
             it.setOnFrameAvailableListener({
-                synchronized(lock) { frameAvailable = true; lock.notifyAll() }
+                pendingFrames.incrementAndGet()
+                synchronized(lock) { lock.notifyAll() }
             }, Handler(callbacks.looper))
         }
     }
@@ -264,7 +267,8 @@ class VideoPipeline {
         yuvProgram = 0
         window = EGL14.EGL_NO_SURFACE
         hasFrame = false
-        frameAvailable = false
+        pendingFrames.set(0)
+        yuvVerified = false
     }
 
     companion object {

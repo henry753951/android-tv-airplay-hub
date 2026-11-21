@@ -180,6 +180,9 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     lateinit var dacpPlayer: DacpPlayer
         private set
     private val _mainHandler = Handler(Looper.getMainLooper())
+    // The first connection found the screen off, so this cast is what switched the TV on.
+    @Volatile private var _wokeForCast = false
+    private val _autoSleep = Runnable { _maybeAutoSleep() }
     private val pinTimeout = Runnable { clearPin() }
     @Volatile private var _coverArtBytes: ByteArray? = null
     private var mediaSession: MediaSessionCompat? = null
@@ -647,6 +650,8 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     override fun onDestroy() {
+        _mainHandler.removeCallbacks(_autoSleep)
+        CastAutoSleep.disarm()
         stopServer()
         remote.close()
         dacpPlayer.release()
@@ -819,6 +824,9 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     override fun onConnectionInit() {
         val firstConnection = _connectionCount.value == 0
+        // Read before launching the receiver screen, which is what turns the screen on.
+        if (firstConnection) _noteCastStart()
+        _mainHandler.post { _cancelAutoSleep() }
         _connectionCount.value++
         _mainHandler.post { updatePowerPolicy() }
         log("Sender connected (${_connectionCount.value})")
@@ -853,6 +861,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             _refreshDacpPlayer()
             _updateMediaNotification()
         }
+        if (_connectionCount.value == 0) _mainHandler.post { _armAutoSleep() }
         _mainHandler.post { updatePowerPolicy() }
         log("Sender disconnected (${_connectionCount.value})")
     }
@@ -1124,6 +1133,58 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             }
         }
         return builder.build()
+    }
+
+    // ---- standby again after a cast that switched the TV on ---------------------------------------
+
+    private fun _noteCastStart() {
+        val interactive = getSystemService(android.os.PowerManager::class.java)?.isInteractive ?: true
+        _wokeForCast = !interactive
+        CastAutoSleep.begin()
+    }
+
+    private fun _armAutoSleep() {
+        val arm = CastAutoSleepPolicy.shouldArm(
+            wokeForCast = _wokeForCast, enabled = prefs[Prefs.AUTO_SLEEP_AFTER_CAST],
+            userPresent = CastAutoSleep.userPresent, uiVisible = CastAutoSleep.uiVisible
+        )
+        if (!arm) {
+            _wokeForCast = false
+            return
+        }
+        CastAutoSleep.arm(SystemClock.elapsedRealtime() + CastAutoSleep.GRACE_MS)
+        _mainHandler.removeCallbacks(_autoSleep)
+        _mainHandler.postDelayed(_autoSleep, CastAutoSleep.GRACE_MS)
+        log("Cast ended; standby in ${CastAutoSleep.GRACE_MS / 1000}s unless the TV is used")
+    }
+
+    private fun _cancelAutoSleep() {
+        _mainHandler.removeCallbacks(_autoSleep)
+        CastAutoSleep.disarm()
+    }
+
+    private fun _maybeAutoSleep() {
+        val sleep = CastAutoSleepPolicy.shouldSleep(
+            deadline = CastAutoSleep.deadline.value, now = SystemClock.elapsedRealtime(),
+            clients = _connectionCount.value, userPresent = CastAutoSleep.userPresent,
+            uiVisible = CastAutoSleep.uiVisible
+        )
+        CastAutoSleep.disarm()
+        _wokeForCast = false
+        if (!sleep) return
+        log("Returning the TV to standby after the cast")
+        // Key injection blocks briefly; keep it off the main thread.
+        Thread({
+            val viaKey = runCatching {
+                io.github.henry753951.airplayremote.remote.input.LocalAdbDriver.init(this)
+                io.github.henry753951.airplayremote.remote.input.LocalAdbDriver.sendKey("sleep")
+            }.getOrDefault(false)
+            if (!viaKey && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val locked = io.github.henry753951.airplayremote.remote.input.RemoteAccessibilityService.instance
+                    ?.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN) == true
+                if (!locked) Log.w(TAG, "Auto standby unavailable: no local key channel or accessibility service")
+            }
+        }, "cast-auto-standby").start()
     }
 
     private fun launchMainActivity() {

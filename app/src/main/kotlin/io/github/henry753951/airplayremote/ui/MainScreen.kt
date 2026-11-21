@@ -610,6 +610,7 @@ fun MainScreen(
     }
 
     castStage?.let { TvCastStageLayer(it, viewModel::disconnectSession) }
+    if (isTv()) TvAutoSleepNotice()
 
     // pin dialog
     if (isTv()) {

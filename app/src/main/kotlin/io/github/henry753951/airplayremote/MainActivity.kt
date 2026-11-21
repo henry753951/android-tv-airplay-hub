@@ -25,6 +25,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import io.github.henry753951.airplayremote.runtime.AirPlayService
+import io.github.henry753951.airplayremote.runtime.CastAutoSleep
 import io.github.henry753951.airplayremote.ui.MainScreen
 import io.github.henry753951.airplayremote.ui.isTvDevice
 import io.github.henry753951.airplayremote.ui.theme.AirPlayTheme
@@ -166,6 +167,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        CastAutoSleep.uiVisible = true
         _syncLocalNetwork()
         _refreshForeground()
     }
@@ -193,6 +195,12 @@ class MainActivity : ComponentActivity() {
             viewModel.serverState.value == AirPlayService.ServerState.RUNNING &&
             viewModel.connectionCount.value > 0
 
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        // A key press or touch means someone is watching; cancel or skip the post-cast standby.
+        CastAutoSleep.noteUserPresent()
+    }
+
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
         if (isTvDevice()) viewModel.disconnectSession()
@@ -206,6 +214,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
+        // Leaving the receiver screen means someone is using the TV: no standby behind their back.
+        CastAutoSleep.uiVisible = false
         // never stop mid-session
         if (!isTvDevice() && !viewModel.pref(Prefs.RUN_IN_BACKGROUND).value && !isChangingConfigurations &&
             viewModel.connectionCount.value == 0 &&
